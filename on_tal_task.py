@@ -19,12 +19,18 @@ import torchvision.transforms as transforms
 from models import build_model
 from collections import defaultdict
 from dataset import THUMOS14Dataset
+from dataset_epic import EPICKitchensDataset
 from criterion import build_criterion
 import cv2
 from eval import evaluation_detection
 from pathlib import Path
 import glob
 from collections import OrderedDict
+
+def _build_dataset(args, subset):
+    if args.dataset == 'epic':
+        return EPICKitchensDataset(args, subset)
+    return THUMOS14Dataset(args, subset)
 
 def on_tal(args):
     if args.mode == 'train':
@@ -34,8 +40,8 @@ def on_tal(args):
         
 def train(args):
     save_path = args.save_path
-    train_dataset = THUMOS14Dataset(args, subset='train')
-    test_dataset = THUMOS14Dataset(args, subset='test')
+    train_dataset = _build_dataset(args, subset='train')
+    test_dataset = _build_dataset(args, subset='test')
     
     train_loader = torch.utils.data.DataLoader(train_dataset, 
                                             batch_size=args.batch, shuffle= False,
@@ -132,8 +138,8 @@ def train(args):
 def eval(args):
     args.training = False
     save_path = args.save_path
-    test_dataset = THUMOS14Dataset(args, subset='test')
-                
+    test_dataset = _build_dataset(args, subset='test')
+
     test_loader = torch.utils.data.DataLoader(test_dataset,
                                             batch_size=args.batch, shuffle=False,
                                             num_workers=args.num_workers, pin_memory=True,drop_last=False) 
