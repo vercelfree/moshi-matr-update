@@ -214,6 +214,8 @@ class EPICKitchensDataset(data.Dataset):
         flag_label = [[] for _ in range(self.p_videos)]
         stcls_label = [[] for _ in range(self.p_videos)]
         max_inst_cnt = 0
+        overflow_windows = 0
+        overflow_instances = 0
 
         for v_set in range(self.p_videos):
             inputs_all = self.inputs_all[v_set]
@@ -235,6 +237,16 @@ class EPICKitchensDataset(data.Dataset):
                         tmp_target_boxes.append(target_box)
                     if calc_iou(y_box, target_box) > 0.01:
                         flag_gt = 1
+
+                # The decoder has a fixed args.num_queries prediction slots per window.
+                # EPIC's action density is high enough that a window can contain more
+                # ground-truth instances than THUMOS ever does; cap to num_queries
+                # (THUMOS's original code assumes this never happens, so it has no such
+                # cap -- here it's required or np.stack below gets a ragged array).
+                if len(tmp_target_boxes) > self.num_queries:
+                    overflow_windows += 1
+                    overflow_instances += len(tmp_target_boxes) - self.num_queries
+                    tmp_target_boxes = tmp_target_boxes[:self.num_queries]
 
                 if len(tmp_target_boxes) != 0:
                     for tmp_target_box in tmp_target_boxes:
@@ -279,6 +291,13 @@ class EPICKitchensDataset(data.Dataset):
                 reg_label[v_set].append(tmp_reg_label)
                 flag_label[v_set].append(flag_gt)
                 stcls_label[v_set].append(tmp_stcls_label)
+
+        if overflow_windows:
+            print(f"WARNING: {overflow_windows} window(s) had more ground-truth instances than "
+                  f"args.num_queries={self.num_queries}; dropped {overflow_instances} instance(s) "
+                  f"total (kept the first {self.num_queries} per window). Consider raising "
+                  f"num_queries in the notebook config if this count is large relative to "
+                  f"{len(self.inputs_all[0]) * self.p_videos} total windows.")
 
         self.cls_label = np.stack(cls_label, axis=0)
         self.reg_label = np.stack(reg_label, axis=0)

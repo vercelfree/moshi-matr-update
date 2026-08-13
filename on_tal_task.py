@@ -22,7 +22,7 @@ from dataset import THUMOS14Dataset
 from dataset_epic import EPICKitchensDataset
 from criterion import build_criterion
 import cv2
-from eval import evaluation_detection
+from eval import evaluation_detection, get_tiou_thresholds
 from pathlib import Path
 import glob
 from collections import OrderedDict
@@ -31,6 +31,15 @@ def _build_dataset(args, subset):
     if args.dataset == 'epic':
         return EPICKitchensDataset(args, subset)
     return THUMOS14Dataset(args, subset)
+
+def _mAP_keys(args, suffix=''):
+    """Per-threshold metric names, derived from the dataset's tIoU thresholds.
+
+    Reproduces the original 'mAP_03'..'mAP_07' names for THUMOS14 (0.3:0.7) and
+    yields 'mAP_01'..'mAP_05' for EPIC-Kitchens (0.1:0.5), so logged metrics are
+    always labelled with the threshold they actually correspond to.
+    """
+    return ['mAP_%02d%s' % (int(round(t * 10)), suffix) for t in get_tiou_thresholds(args)]
 
 def on_tal(args):
     if args.mode == 'train':
@@ -71,7 +80,10 @@ def train(args):
                                                 T_up=args.lr_Tup, gamma=args.lr_gamma)
     
     if args.load_model:
-        checkpoint = torch.load(args.model_path)
+        # weights_only=False: these checkpoints are written by this codebase and
+        # contain non-tensor state (numpy scalars in the logged metrics), which
+        # PyTorch >=2.6 rejects under the new weights_only=True default.
+        checkpoint = torch.load(args.model_path, weights_only=False)
         pretrained_dict = checkpoint['state_dict']
         pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model.state_dict()}
         model.load_state_dict(pretrained_dict)
@@ -92,11 +104,8 @@ def train(args):
         
         if epoch % args.train_eval_step == 0:
             print_log(save_path, 'mAP: %.2f' % (train_log['mAP_train']))
-            print_log(save_path, 'mAP@.3: %.2f' % (train_log['mAP_03_train']))
-            print_log(save_path, 'mAP@0.4: %.2f' % (train_log['mAP_04_train']))
-            print_log(save_path, 'mAP@.5: %.2f' % (train_log['mAP_05_train']))
-            print_log(save_path, 'mAP@.6: %.2f' % (train_log['mAP_06_train']))
-            print_log(save_path, 'mAP@.7: %.2f' % (train_log['mAP_07_train']))
+            for _t, _k in zip(get_tiou_thresholds(args), _mAP_keys(args, '_train')):
+                print_log(save_path, 'mAP@%.1f: %.2f' % (_t, train_log[_k]))
         scheduler.step()
         
         if args.wandb:
@@ -107,11 +116,8 @@ def train(args):
                
             if epoch % args.test_eval_step == 0:
                 print_log(save_path, 'mAP: %.2f' % (test_log['mAP_test']))
-                print_log(save_path, 'mAP@.3: %.2f' % (test_log['mAP_03_test']))
-                print_log(save_path, 'mAP@0.4: %.2f' % (test_log['mAP_04_test']))
-                print_log(save_path, 'mAP@.5: %.2f' % (test_log['mAP_05_test']))
-                print_log(save_path, 'mAP@.6: %.2f' % (test_log['mAP_06_test']))
-                print_log(save_path, 'mAP@.7: %.2f' % (test_log['mAP_07_test']))
+                for _t, _k in zip(get_tiou_thresholds(args), _mAP_keys(args, '_test')):
+                    print_log(save_path, 'mAP@%.1f: %.2f' % (_t, test_log[_k]))
             if args.wandb:
                 wandb.log(test_log)
 
@@ -149,7 +155,7 @@ def eval(args):
     model = torch.nn.DataParallel(model).to(device)
     criterion = build_criterion(args, device)
     
-    checkpoint = torch.load(args.model_path)
+    checkpoint = torch.load(args.model_path, weights_only=False)
 
     pretrained_dict = checkpoint['state_dict']
     pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model.state_dict()}
@@ -202,28 +208,22 @@ def eval(args):
     json.dump(output_dict,outfile, indent=2)
     outfile.close()
     
-    tiou_thresholds=np.linspace(0.3,0.70,5)
-    
-    mAP = evaluation_detection(args, proposal_json_path, subset='test', 
+    tiou_thresholds=get_tiou_thresholds(args)
+
+    mAP = evaluation_detection(args, proposal_json_path, subset='test',
                                 tiou_thresholds=tiou_thresholds, verbose=True)
-    
+
     metric_logger.update(mAP=mAP.mean())
-    metric_logger.update(mAP_03=mAP[0])
-    metric_logger.update(mAP_04=mAP[1])
-    metric_logger.update(mAP_05=mAP[2])
-    metric_logger.update(mAP_06=mAP[3])
-    metric_logger.update(mAP_07=mAP[4])
+    for _k, _v in zip(_mAP_keys(args), mAP):
+        metric_logger.update(**{_k: _v})
     
     print("Averaged stats:", metric_logger)
     
     eval_log = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
     
     print_log(save_path, 'mAP: %.2f' % (eval_log['mAP']))
-    print_log(save_path, 'mAP@.3: %.2f' % (eval_log['mAP_03']))
-    print_log(save_path, 'mAP@0.4: %.2f' % (eval_log['mAP_04']))
-    print_log(save_path, 'mAP@.5: %.2f' % (eval_log['mAP_05']))
-    print_log(save_path, 'mAP@.6: %.2f' % (eval_log['mAP_06']))
-    print_log(save_path, 'mAP@.7: %.2f' % (eval_log['mAP_07']))
+    for _t, _k in zip(get_tiou_thresholds(args), _mAP_keys(args)):
+        print_log(save_path, 'mAP@%.1f: %.2f' % (_t, eval_log[_k]))
 
 def train_one_epoch(args, train_dataset, train_loader, model, criterion, optimizer, epoch, device):
     model.train()
@@ -301,20 +301,17 @@ def train_one_epoch(args, train_dataset, train_loader, model, criterion, optimiz
         json.dump(output_dict,outfile, indent=2)
         outfile.close()
         
-        tiou_thresholds=np.linspace(0.3,0.70,5)
-        mAP = evaluation_detection(args, proposal_json_path, subset='train', 
-                                    tiou_thresholds=tiou_thresholds, verbose=True)        
-    else:        
-        mAP = np.array([0,0,0,0,0], dtype=np.float)
+        tiou_thresholds=get_tiou_thresholds(args)
+        mAP = evaluation_detection(args, proposal_json_path, subset='train',
+                                    tiou_thresholds=tiou_thresholds, verbose=True)
+    else:
+        mAP = np.zeros(len(get_tiou_thresholds(args)), dtype=float)
 
-    metric_logger.synchronize_between_processes()  
+    metric_logger.synchronize_between_processes()
 
     metric_logger.update(mAP_train=mAP.mean())
-    metric_logger.update(mAP_03_train=mAP[0])
-    metric_logger.update(mAP_04_train=mAP[1])
-    metric_logger.update(mAP_05_train=mAP[2])
-    metric_logger.update(mAP_06_train=mAP[3])
-    metric_logger.update(mAP_07_train=mAP[4])
+    for _k, _v in zip(_mAP_keys(args, '_train'), mAP):
+        metric_logger.update(**{_k: _v})
     
     print("Averaged stats:", metric_logger)
     
@@ -392,22 +389,19 @@ def test_one_epoch(args, test_dataset, test_loader, model, criterion, optimizer,
         json.dump(output_dict,outfile, indent=2)
         outfile.close()
         
-        tiou_thresholds=np.linspace(0.3,0.70,5)
-        mAP = evaluation_detection(args, proposal_json_path, subset='test', 
+        tiou_thresholds=get_tiou_thresholds(args)
+        mAP = evaluation_detection(args, proposal_json_path, subset='test',
                                     tiou_thresholds=tiou_thresholds, verbose=True)
         # import pdb;pdb.set_trace()
         ###`
     else:
-        mAP = np.array([0,0,0,0,0], dtype=np.float)
-    
-    metric_logger.synchronize_between_processes()  
-    
+        mAP = np.zeros(len(get_tiou_thresholds(args)), dtype=float)
+
+    metric_logger.synchronize_between_processes()
+
     metric_logger.update(mAP_test=mAP.mean())
-    metric_logger.update(mAP_03_test=mAP[0])
-    metric_logger.update(mAP_04_test=mAP[1])
-    metric_logger.update(mAP_05_test=mAP[2])
-    metric_logger.update(mAP_06_test=mAP[3])
-    metric_logger.update(mAP_07_test=mAP[4])
+    for _k, _v in zip(_mAP_keys(args, '_test'), mAP):
+        metric_logger.update(**{_k: _v})
     
     print("Averaged stats:", metric_logger)
     
